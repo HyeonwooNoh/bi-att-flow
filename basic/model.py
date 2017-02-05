@@ -56,7 +56,10 @@ class Model(object):
         self.loss = None
 
         self._build_forward()
-        self._build_loss()
+        if config.importance_weighted_training:
+            self._build_importance_weighted_loss()
+        else:
+            self._build_loss()
         self.var_ema = None
         if rep:
             self._build_var_ema()
@@ -72,6 +75,31 @@ class Model(object):
             config.batch_size, config.max_num_sents, config.max_sent_size, \
             config.max_ques_size, config.word_vocab_size, config.char_vocab_size, config.hidden_size, \
             config.max_word_size
+
+        # Tile inputs for importance weighted training or set inputs from placeholder
+        with tf.variable_scope("set_input_forward"):
+            if config.importance_weighted_training:
+                S = config.num_samples
+                input_x = tf.cond(self.is_train, lambda: tf.tile(
+                    self.x, [S, 1, 1]), lambda: self.x, name='input_x')
+                input_cx = tf.cond(self.is_train, lambda: tf.tile(
+                    self.cx, [S, 1, 1, 1]), lambda: self.cx, name='input_cx')
+                input_x_mask = tf.cond(self.is_train, lambda: tf.tile(
+                    self.x_mask, [S, 1, 1]), lambda: self.x_mask, name='input_x_mask')
+                input_q = tf.cond(self.is_train, lambda: tf.tile(
+                    self.q, [S, 1]), lambda: self.q, name='input_q')
+                input_cq = tf.cond(self.is_train, lambda: tf.tile(
+                    self.cq, [S, 1, 1]), lambda: self.cq, name='input_cq')
+                input_q_mask = tf.cond(self.is_train, lambda: tf.tile(
+                    self.q_mask, [S, 1]), lambda: self.q_mask, name='input_q_mask')
+            else:
+                input_x = tf.identity(self.x, name='input_x')
+                input_cx = tf.identity(self.cx, name='input_cx')
+                input_x_mask = tf.identity(self.x_mask, name='input_x_mask')
+                input_q = tf.identity(self.q, name='input_q')
+                input_cq = tf.identity(self.cq, name='input_cq')
+                input_q_mask = tf.identity(self.q_mask, name='input_q_mask')
+
         JX = tf.shape(self.x)[2]
         JQ = tf.shape(self.q)[1]
         M = tf.shape(self.x)[1]
@@ -83,8 +111,8 @@ class Model(object):
                     char_emb_mat = tf.get_variable("char_emb_mat", shape=[VC, dc], dtype='float')
 
                 with tf.variable_scope("char"):
-                    Acx = tf.nn.embedding_lookup(char_emb_mat, self.cx)  # [N, M, JX, W, dc]
-                    Acq = tf.nn.embedding_lookup(char_emb_mat, self.cq)  # [N, JQ, W, dc]
+                    Acx = tf.nn.embedding_lookup(char_emb_mat, input_cx)  # [N, M, JX, W, dc]
+                    Acq = tf.nn.embedding_lookup(char_emb_mat, input_cq)  # [N, JQ, W, dc]
                     Acx = tf.reshape(Acx, [-1, JX, W, dc])
                     Acq = tf.reshape(Acq, [-1, JQ, W, dc])
 
@@ -111,8 +139,8 @@ class Model(object):
                         word_emb_mat = tf.concat(0, [word_emb_mat, self.new_emb_mat])
 
                 with tf.name_scope("word"):
-                    Ax = tf.nn.embedding_lookup(word_emb_mat, self.x)  # [N, M, JX, d]
-                    Aq = tf.nn.embedding_lookup(word_emb_mat, self.q)  # [N, JQ, d]
+                    Ax = tf.nn.embedding_lookup(word_emb_mat, input_x)  # [N, M, JX, d]
+                    Aq = tf.nn.embedding_lookup(word_emb_mat, input_q)  # [N, JQ, d]
                     self.tensor_dict['x'] = Ax
                     self.tensor_dict['q'] = Aq
                 if config.use_char_emb:
@@ -134,8 +162,8 @@ class Model(object):
 
         cell = BasicLSTMCell(d, state_is_tuple=True)
         d_cell = SwitchableDropoutWrapper(cell, self.is_train, input_keep_prob=config.input_keep_prob)
-        x_len = tf.reduce_sum(tf.cast(self.x_mask, 'int32'), 2)  # [N, M]
-        q_len = tf.reduce_sum(tf.cast(self.q_mask, 'int32'), 1)  # [N]
+        x_len = tf.reduce_sum(tf.cast(input_x_mask, 'int32'), 2)  # [N, M]
+        q_len = tf.reduce_sum(tf.cast(input_q_mask, 'int32'), 1)  # [N]
 
         with tf.variable_scope("prepro"):
             (fw_u, bw_u), ((_, fw_u_f), (_, bw_u_f)) = bidirectional_dynamic_rnn(d_cell, d_cell, qq, q_len, dtype='float', scope='u1')  # [N, J, d], [N, d]
@@ -153,12 +181,12 @@ class Model(object):
         with tf.variable_scope("main"):
             if config.dynamic_att:
                 p0 = h
-                u = tf.reshape(tf.tile(tf.expand_dims(u, 1), [1, M, 1, 1]), [N * M, JQ, 2 * d])
-                q_mask = tf.reshape(tf.tile(tf.expand_dims(self.q_mask, 1), [1, M, 1]), [N * M, JQ])
+                u = tf.reshape(tf.tile(tf.expand_dims(u, 1), [1, M, 1, 1]), [-1, JQ, 2 * d])
+                q_mask = tf.reshape(tf.tile(tf.expand_dims(input_q_mask, 1), [1, M, 1]), [-1, JQ])
                 first_cell = AttentionCell(cell, u, mask=q_mask, mapper='sim',
                                            input_keep_prob=self.config.input_keep_prob, is_train=self.is_train)
             else:
-                p0 = attention_layer(config, self.is_train, h, u, h_mask=self.x_mask, u_mask=self.q_mask, scope="p0", tensor_dict=self.tensor_dict)
+                p0 = attention_layer(config, self.is_train, h, u, h_mask=input_x_mask, u_mask=input_q_mask, scope="p0", tensor_dict=self.tensor_dict)
                 first_cell = d_cell
 
             (fw_g0, bw_g0), _ = bidirectional_dynamic_rnn(first_cell, first_cell, p0, x_len, dtype='float', scope='g0')  # [N, M, JX, 2d]
@@ -167,15 +195,15 @@ class Model(object):
             g1 = tf.concat(3, [fw_g1, bw_g1])
 
             logits = get_logits([g1, p0], d, True, wd=config.wd, input_keep_prob=config.input_keep_prob,
-                                mask=self.x_mask, is_train=self.is_train, func=config.answer_func, scope='logits1')
-            a1i = softsel(tf.reshape(g1, [N, M * JX, 2 * d]), tf.reshape(logits, [N, M * JX]))
+                                mask=input_x_mask, is_train=self.is_train, func=config.answer_func, scope='logits1')
+            a1i = softsel(tf.reshape(g1, [-1, M * JX, 2 * d]), tf.reshape(logits, [-1, M * JX]))
             a1i = tf.tile(tf.expand_dims(tf.expand_dims(a1i, 1), 1), [1, M, JX, 1])
 
             (fw_g2, bw_g2), _ = bidirectional_dynamic_rnn(d_cell, d_cell, tf.concat(3, [p0, g1, a1i, g1 * a1i]),
                                                           x_len, dtype='float', scope='g2')  # [N, M, JX, 2d]
             g2 = tf.concat(3, [fw_g2, bw_g2])
             logits2 = get_logits([g2, p0], d, True, wd=config.wd, input_keep_prob=config.input_keep_prob,
-                                 mask=self.x_mask,
+                                 mask=input_x_mask,
                                  is_train=self.is_train, func=config.answer_func, scope='logits2')
 
             flat_logits = tf.reshape(logits, [-1, M * JX])
@@ -190,23 +218,108 @@ class Model(object):
 
             self.logits = flat_logits
             self.logits2 = flat_logits2
+            self.flat_yp = flat_yp
+            self.flat_yp2 = flat_yp2
             self.yp = yp
             self.yp2 = yp2
 
     def _build_loss(self):
         config = self.config
-        JX = tf.shape(self.x)[2]
-        M = tf.shape(self.x)[1]
-        JQ = tf.shape(self.q)[1]
-        loss_mask = tf.reduce_max(tf.cast(self.q_mask, 'float'), 1)
-        losses = tf.nn.softmax_cross_entropy_with_logits(
-            self.logits, tf.cast(tf.reshape(self.y, [-1, M * JX]), 'float'))
-        ce_loss = tf.reduce_mean(loss_mask * losses)
+        with tf.variable_scope("basic_loss"):
+            JX = tf.shape(self.x)[2]
+            M = tf.shape(self.x)[1]
+            JQ = tf.shape(self.q)[1]
+            with tf.variable_scope("loss1"):
+                loss_mask = tf.reduce_max(tf.cast(self.q_mask, 'float'), 1)
+                losses = tf.nn.softmax_cross_entropy_with_logits(
+                    self.logits, tf.cast(tf.reshape(self.y, [-1, M * JX]), 'float'))
+                ce_loss = tf.reduce_mean(loss_mask * losses)
+
+            with tf.variable_scope("loss2"):
+                ce_loss2 = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
+                    self.logits2, tf.cast(tf.reshape(self.y2, [-1, M * JX]), 'float')))
+
+        # loss 1, 2 
         tf.add_to_collection('losses', ce_loss)
-        ce_loss2 = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
-            self.logits2, tf.cast(tf.reshape(self.y2, [-1, M * JX]), 'float')))
         tf.add_to_collection("losses", ce_loss2)
 
+		  # total_loss
+        self.loss = tf.add_n(tf.get_collection('losses', scope=self.scope), name='loss')
+        tf.scalar_summary(self.loss.op.name, self.loss)
+        tf.add_to_collection('ema/scalar', self.loss)
+
+    def _build_importance_weighted_loss(self):
+        config = self.config 
+        with tf.variable_scope("importance_weighted_loss"):
+            # Tile inputs for importance weighted training
+            with tf.variable_scope("set_input_loss"):
+                JX = tf.shape(self.x)[2]
+                JQ = tf.shape(self.q)[1]
+                M = tf.shape(self.x)[1]
+                N = config.batch_size
+                S = config.num_samples
+                label_q_mask = tf.cond(self.is_train, lambda: tf.tile(
+                    self.q_mask, [S, 1]), lambda: self.q_mask, name='label_q_mask')
+                label_y = tf.cond(self.is_train, lambda: tf.tile(
+                    self.y, [S, 1, 1]), lambda: self.y, name='label_y')
+                label_y2 = tf.cond(self.is_train, lambda: tf.tile(
+                    self.y2, [S, 1, 1]), lambda: self.y2, name='label_y2')
+                eps = tf.constant(1e-12, dtype='float32', name='epsilon')
+
+            # Compute importance weights
+            with tf.variable_scope("importance_weight"):
+                def get_importance_weight():
+                    onehot_y = tf.cast(tf.reshape(label_y, [N * S, -1]), tf.float32)
+                    correct_y_prob = tf.add(tf.reduce_sum(tf.mul(
+                        onehot_y, tf.stop_gradient(self.flat_yp)), 1), eps)  # [N * S]
+                    prob_normalizer = tf.tile(tf.reduce_sum(tf.reshape(
+                        correct_y_prob, [S, N]), 0), [S])  # [N * S]
+                    importance_weight = tf.mul(tf.truediv(
+                        correct_y_prob, prob_normalizer), S) # [N * S]
+                    return importance_weight
+
+                importance_weight = tf.cond(
+                    self.is_train, get_importance_weight, lambda: tf.ones([N]))
+                tf.histogram_summary('importance_weight', importance_weight)
+
+            with tf.variable_scope("importance_weight2"):
+                def get_importance_weight2():
+                    onehot_y2 = tf.cast(tf.reshape(label_y2, [N * S, -1]), 'float32')
+                    correct_y2_prob = tf.add(tf.reduce_sum(tf.mul(
+                        onehot_y2, tf.stop_gradient(self.flat_yp2)), 1), eps)  # [N * S]
+                    prob_normalizer2 = tf.tile(tf.reduce_sum(tf.reshape(
+                        correct_y2_prob, [S, N]), 0), [S])  # [N * S]
+                    importance_weight2 = tf.mul(tf.truediv(
+                        correct_y2_prob, prob_normalizer2), S) # [N * S]
+                    return importance_weight2
+
+                importance_weight2 = tf.cond(
+                    self.is_train, get_importance_weight2, lambda: tf.ones([N]))
+                tf.histogram_summary('importance_weight2', importance_weight2)
+
+            with tf.variable_scope("loss1"):
+                loss_mask = tf.reduce_max(tf.cast(label_q_mask, 'float'), 1)
+                losses = tf.nn.softmax_cross_entropy_with_logits(
+                    self.logits, tf.cast(tf.reshape(label_y, [-1, M * JX]), 'float'))
+                loss1 = loss_mask * losses
+                tf.histogram_summary("loss1", loss1)
+                iw_loss1 = tf.cond(self.is_train, lambda: loss1 * importance_weight, lambda: loss1)
+                tf.histogram_summary("iw_loss1", iw_loss1)
+                ce_loss = tf.reduce_mean(iw_loss1)
+
+            with tf.variable_scope("loss2"):
+                losses2 = tf.nn.softmax_cross_entropy_with_logits(
+                    self.logits2, tf.cast(tf.reshape(label_y2, [-1, M * JX]), 'float'))
+                tf.histogram_summary("loss2", losses2)
+                iw_loss2 = tf.cond(self.is_train, lambda: losses2 * importance_weight2, lambda: losses2)
+                tf.histogram_summary("iw_loss2", iw_loss2) 
+                ce_loss2 = tf.reduce_mean(iw_loss2)
+
+        # loss 1, 2 
+        tf.add_to_collection('losses', ce_loss)
+        tf.add_to_collection('losses', ce_loss2)
+
+		  # total_loss
         self.loss = tf.add_n(tf.get_collection('losses', scope=self.scope), name='loss')
         tf.scalar_summary(self.loss.op.name, self.loss)
         tf.add_to_collection('ema/scalar', self.loss)

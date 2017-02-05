@@ -90,10 +90,25 @@ def _train(config):
     graph_handler.initialize(sess)
 
     # Begin training
-    num_steps = config.num_steps or int(math.ceil(train_data.num_examples / (config.batch_size * config.num_gpus))) * config.num_epochs
+    num_steps = config.num_steps * config.num_grad_accumulate_iteration or int(math.ceil(train_data.num_examples / (config.batch_size * config.num_grad_accumulate_iteration * config.num_gpus))) * config.num_epochs
     global_step = 0
+    grad_accum_it = 0
+    iter_unit = "(/{})".format(config.num_grad_accumulate_iteration)
+    custom_bar_format = "{l_bar}{bar}| {n_fmt}"+iter_unit+\
+                        "/{total_fmt}"+iter_unit+\
+                        " [{elapsed}<{remaining}, {rate_fmt}]"
     for batches in tqdm(train_data.get_multi_batches(config.batch_size, config.num_gpus,
-                                                     num_steps=num_steps, shuffle=True, cluster=config.cluster), total=num_steps):
+                                                     num_steps=num_steps, shuffle=True,
+                                                     cluster=config.cluster),
+                        bar_format=custom_bar_format,total=num_steps):
+        # Accumulate gradients for fixed number of iterations
+        if grad_accum_it < config.num_grad_accumulate_iteration - 1:
+            trainer.accum_grad_step(sess, batches, grad_accum_it != 0)
+            grad_accum_it += 1
+            continue
+        else:
+            grad_accum_it = 0
+        # Standard Procedures for training
         global_step = sess.run(model.global_step) + 1  # +1 because all calculations are done after step
         get_summary = global_step % config.log_period == 0
         loss, summary, train_op = trainer.step(sess, batches, get_summary=get_summary)

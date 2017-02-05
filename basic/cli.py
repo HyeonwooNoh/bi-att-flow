@@ -32,6 +32,7 @@ flags.DEFINE_bool("eval", True, "eval? [True]")
 
 # Training / test parameters
 flags.DEFINE_integer("batch_size", 60, "Batch size [60]")
+flags.DEFINE_integer("num_grad_accumulate_iteration", 1, "Number of gradient accumulate iteration[1]")
 flags.DEFINE_integer("val_num_batches", 100, "validation num batches [100]")
 flags.DEFINE_integer("test_num_batches", 0, "test num batches [0]")
 flags.DEFINE_integer("num_epochs", 12, "Total number of epochs for training [12]")
@@ -52,6 +53,8 @@ flags.DEFINE_integer("highway_num_layers", 2, "highway num layers [2]")
 flags.DEFINE_bool("share_cnn_weights", True, "Share Char-CNN weights [True]")
 flags.DEFINE_bool("share_lstm_weights", True, "Share pre-processing (phrase-level) LSTM weights [True]")
 flags.DEFINE_float("var_decay", 0.999, "Exponential moving average decay for variables [0.999]")
+flags.DEFINE_bool("importance_weighted_training", False, "Use importance weighted training")
+flags.DEFINE_integer("num_samples", 5, "Number of samples used for importance weighted training")
 
 # Optimizations
 flags.DEFINE_bool("cluster", False, "Cluster data for faster training [False]")
@@ -100,8 +103,14 @@ flags.DEFINE_bool("dynamic_att", False, "Dynamic attention [False]")
 
 def main(_):
     config = flags.FLAGS
-
-    config.out_dir = os.path.join(config.out_base_dir, config.model_name, str(config.run_id).zfill(2))
+    out_model_name = config.model_name
+    if config.importance_weighted_training:
+        out_model_name += "_batch_size_{}_iwdrop_{}_accum_iter_{}".format(
+            config.batch_size, config.num_samples, config.num_grad_accumulate_iteration)
+    else:
+        out_model_name += "_batch_size_{}_accum_iter_{}".format(
+            config.batch_size, config.num_grad_accumulate_iteration)
+    config.out_dir = os.path.join(config.out_base_dir, out_model_name, str(config.run_id).zfill(2))
 
     m(config)
 
