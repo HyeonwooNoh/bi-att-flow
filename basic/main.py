@@ -86,7 +86,9 @@ def _train(config):
     graph_handler = GraphHandler(config, model)  # controls all tensors and variables in the graph, including loading /saving
 
     # Variables
-    sess = tf.Session(config=tf.ConfigProto(allow_soft_placement=True))
+    config_proto=tf.ConfigProto(allow_soft_placement=True)
+    config_proto.gpu_options.allow_growth=True
+    sess = tf.Session(config=config_proto)
     graph_handler.initialize(sess)
 
     # Begin training
@@ -111,7 +113,9 @@ def _train(config):
         # Standard Procedures for training
         global_step = sess.run(model.global_step) + 1  # +1 because all calculations are done after step
         get_summary = global_step % config.log_period == 0
-        loss, summary, train_op = trainer.step(sess, batches, get_summary=get_summary)
+        loss, summary, train_op = trainer.step(
+            sess, batches, get_summary=get_summary,
+            do_accumulate_grads=(config.num_grad_accumulate_iteration > 1))
         if get_summary:
             graph_handler.add_summary(summary, global_step)
 

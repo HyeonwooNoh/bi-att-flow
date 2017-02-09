@@ -15,7 +15,8 @@ from my.tensorflow.rnn_cell import SwitchableDropoutWrapper, AttentionCell
 def get_multi_gpu_models(config):
     models = []
     for gpu_idx in range(config.num_gpus):
-        with tf.name_scope("model_{}".format(gpu_idx)) as scope, tf.device("/{}:{}".format(config.device_type, gpu_idx)):
+        with tf.name_scope("model_{}".format(gpu_idx)) as scope, tf.device(
+            "/{}:{}".format(config.device_type, gpu_idx+config.first_gpu_idx)):
             model = Model(config, scope, rep=gpu_idx == 0)
             tf.get_variable_scope().reuse_variables()
             models.append(model)
@@ -245,7 +246,7 @@ class Model(object):
 
 		  # total_loss
         self.loss = tf.add_n(tf.get_collection('losses', scope=self.scope), name='loss')
-        tf.scalar_summary(self.loss.op.name, self.loss)
+        #tf.scalar_summary(self.loss.op.name, self.loss)
         tf.add_to_collection('ema/scalar', self.loss)
 
     def _build_importance_weighted_loss(self):
@@ -321,7 +322,7 @@ class Model(object):
 
 		  # total_loss
         self.loss = tf.add_n(tf.get_collection('losses', scope=self.scope), name='loss')
-        tf.scalar_summary(self.loss.op.name, self.loss)
+        #tf.scalar_summary(self.loss.op.name, self.loss)
         tf.add_to_collection('ema/scalar', self.loss)
 
     def _build_ema(self):

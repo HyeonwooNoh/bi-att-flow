@@ -21,6 +21,7 @@ flags.DEFINE_string("shared_path", "", "Shared path []")
 flags.DEFINE_string("device", "/cpu:0", "default device for summing gradients. [/cpu:0]")
 flags.DEFINE_string("device_type", "gpu", "device for computing gradients (parallelization). cpu | gpu [gpu]")
 flags.DEFINE_integer("num_gpus", 1, "num of gpus or cpus for computing gradients [1]")
+flags.DEFINE_integer("first_gpu_idx", 0, "Index of the first gpus [0]")
 
 # Essential training and test options
 flags.DEFINE_string("mode", "test", "trains | test | forward [test]")

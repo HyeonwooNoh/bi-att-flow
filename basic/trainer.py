@@ -62,7 +62,6 @@ class MultiGPUTrainer(object):
         with tf.variable_scope("accumulate_grads"):
             for grad, var in self.grads:
                 accumulated_grad = tf.Variable(tf.zeros(var.get_shape()),
-                                               validate_shape=False,
                                                name=('accumulated_'+grad.name).split(':')[0])
                 accumulated_grad = tf.cond(self.do_accumulate_grads, lambda: tf.assign_add(
                    accumulated_grad, grad), lambda: tf.assign(accumulated_grad, grad))
@@ -84,7 +83,9 @@ class MultiGPUTrainer(object):
                 self.averaged_accumulated_grads.append(averaged_accumulated_grad_and_var) 
         with tf.variable_scope("average_accumulated_loss"):
             self.averaged_accumulated_loss = self.accumulated_loss / self.config.num_grad_accumulate_iteration
-
+        tf.scalar_summary("model_0/loss", self.averaged_accumulated_loss)
+        self.train_summary = tf.merge_all_summaries()
+        self.train_summary = tf.merge_summary(tf.get_collection("summaries", self.model.scope))
         # Training operation with accumulated gradients
         self.train_op = self.opt.apply_gradients(self.averaged_accumulated_grads,
                                                  global_step=self.global_step)
@@ -100,17 +101,17 @@ class MultiGPUTrainer(object):
         # Forward-backward graph and accumulate loss and gradients
         sess.run([self.accumulated_loss, self.accumulated_grads_op], feed_dict=feed_dict)
 
-    def step(self, sess, batches, get_summary=False):
+    def step(self, sess, batches, get_summary=False, do_accumulate_grads=True):
         assert isinstance(sess, tf.Session)
         feed_dict = {}
         for batch, model in zip(batches, self.models):
             _, ds = batch
             feed_dict.update(model.get_feed_dict(ds, True))
-        feed_dict.update({self.do_accumulate_grads: True}) 
+        feed_dict.update({self.do_accumulate_grads: do_accumulate_grads}) 
 
         if get_summary:
             loss, summary, train_op = \
-            sess.run([self.averaged_accumulated_loss, self.summary, self.train_op],
+            sess.run([self.averaged_accumulated_loss, self.train_summary, self.train_op],
                      feed_dict=feed_dict)
         else:
             loss, train_op = sess.run([self.averaged_accumulated_loss, self.train_op],
